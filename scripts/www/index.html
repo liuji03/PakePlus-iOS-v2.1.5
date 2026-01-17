@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>温石客户年需求 - 移动版</title>
   <link rel="stylesheet" href="style.css">
 </head>
@@ -55,10 +55,67 @@
     </div>
   </div>
 
+  <!-- Navigation Preview Panel -->
+  <div id="nav-preview-panel" class="panel-overlay hidden" style="z-index: 2000;">
+    <div class="panel-content full-screen-panel">
+      <div class="panel-header">
+        <h3>路线预览</h3>
+        <button class="close-panel-btn" id="close-nav-preview">×</button>
+      </div>
+      <div class="nav-preview-waypoints">
+        <div class="nav-preview-waypoints-header">
+          <span id="waypoint-count">0 个途径点</span>
+          <button id="recenter-preview-btn" class="text-btn">重新定位</button>
+        </div>
+        <div id="waypoint-list" class="waypoint-list"></div>
+      </div>
+      <div id="nav-preview-map-container" style="flex: 1; position: relative;">
+        <div id="nav-preview-status" class="nav-preview-status hidden"></div>
+      </div>
+      <div id="nav-preview-route-panel" class="nav-preview-route-panel hidden"></div>
+      <div class="panel-footer-actions">
+        <span></span>
+        <div class="action-group">
+            <button id="clear-waypoints-btn" class="text-btn danger">清空</button>
+            <button id="start-nav-btn" class="primary-btn">开始导航</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- Bottom Sheet Profile -->
   <div id="profile-container"></div>
+  <div id="app-toast" class="app-toast"></div>
+  <button id="geo-debug-toggle" class="geo-debug-toggle hidden" type="button">定位诊断</button>
+  <div id="geo-debug-panel" class="geo-debug-panel hidden" role="dialog" aria-modal="true" aria-label="定位诊断">
+    <div class="geo-debug-card">
+      <div class="geo-debug-header">
+        <span>定位诊断</span>
+        <button id="geo-debug-close" class="geo-debug-close" type="button">×</button>
+      </div>
+      <pre id="geo-debug-content" class="geo-debug-content"></pre>
+    </div>
+  </div>
 
-  <script src="https://webapi.amap.com/maps?v=1.4.15&key=5c28dc759462d7f99f7dc0caa88cf7c3&plugin=AMap.DistrictLayer,AMap.Heatmap"></script>
+  <script>
+    (function () {
+      var securityJsCode = window.AMAP_SECURITY_JS_CODE;
+      if (typeof securityJsCode === 'string' && securityJsCode.trim()) {
+        window._AMapSecurityConfig = { securityJsCode: securityJsCode.trim() };
+      }
+    })();
+  </script>
+  <script src="https://webapi.amap.com/loader.js"></script>
+  <script>
+    window.__amapReadyPromise = AMapLoader.load({
+      key: '5c28dc759462d7f99f7dc0caa88cf7c3',
+      version: '2.0',
+      plugins: ['AMap.DistrictLayer', 'AMap.HeatMap', 'AMap.Geolocation', 'AMap.Driving']
+    }).then(function (AMap) {
+      window.AMap = AMap;
+      return AMap;
+    });
+  </script>
   <script src="data.js" defer></script>
   <script src="script.js" defer></script>
 </body>
