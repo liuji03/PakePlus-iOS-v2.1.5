@@ -4,10 +4,15 @@
       all: '123456', 本级: '111111', 瑞安: '222222', 乐清: '333333',
       苍南: '444444', 平阳: '555555', 永嘉: '666666', 泰顺: '777777', 文成: '888888'
     },
-    map: { center: [120.65, 28.01], zoom: 10, resizeEnable: true, searchZoomLevel: 16 },
+    map: {
+      center: [120.65, 28.01],
+      zoom: 10,
+      resizeEnable: true,
+      searchZoomLevel: 16,
+    },
     labels: {
       minZoomToShowLabel: 14,
-      limit: 100, // Reduced for mobile performance
+      limit: 300, // Increased for modern device performance
     },
     heatmap: {
       radius: 25, // Adjusted for mobile screen
@@ -28,7 +33,23 @@
   let allData = [];
   let map = null;
   let heatmapInstance = null;
-  let currentMarkers = []; 
+  let geolocationControl = null;
+  let myLocationPromise = null;
+  let hasCenteredOnMyLocation = false;
+  let toastTimer = null;
+  const labelMarkersByKey = new Map();
+  let currentMarkerKeys = new Set();
+  let suppressMapClickUntil = 0;
+  let geoDiagnostics = {
+    status: 'idle',
+    method: '',
+    locationType: '',
+    info: '',
+    message: '',
+    accuracy: null,
+    updatedAt: 0,
+    scheme: typeof window !== 'undefined' ? window.location?.protocol || '' : ''
+  };
 
   function escapeHtml(value) {
     const s = String(value ?? '');
@@ -73,6 +94,176 @@
     return (Array.isArray(data) ? data : []).map(normalizeItem);
   }
 
+  function normalizeLngLat(pos) {
+    const lng = toNumber(pos?.lng ?? (typeof pos?.getLng === 'function' ? pos.getLng() : NaN), NaN);
+    const lat = toNumber(pos?.lat ?? (typeof pos?.getLat === 'function' ? pos.getLat() : NaN), NaN);
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+    return { lng, lat };
+  }
+
+  function centerMapOnMyLocation(loc) {
+    if (!map || !loc) return;
+    if (hasCenteredOnMyLocation) return;
+    hasCenteredOnMyLocation = true;
+    const nextZoom = Math.max(toNumber(map.getZoom?.(), CONFIG.map.zoom), 12);
+    map.setZoomAndCenter(nextZoom, [loc.lng, loc.lat]);
+  }
+
+  function updateGeoDiagnostics(partial) {
+    geoDiagnostics = { ...geoDiagnostics, ...(partial || {}), updatedAt: Date.now() };
+    try {
+      if (typeof window.__updateGeoDiagnostics === 'function') {
+        window.__updateGeoDiagnostics(geoDiagnostics);
+      }
+    } catch (_) {}
+  }
+
+  function setMyLocation(loc, meta) {
+    const normalized = normalizeLngLat(loc);
+    if (!normalized) return false;
+    store.setState({ myLocation: normalized });
+    updateGeoDiagnostics({
+      status: String(meta?.status || 'success'),
+      method: String(meta?.method || ''),
+      locationType: String(meta?.locationType || ''),
+      info: String(meta?.info || ''),
+      message: String(meta?.message || ''),
+      accuracy: Number.isFinite(Number(meta?.accuracy)) ? Number(meta.accuracy) : null
+    });
+    centerMapOnMyLocation(normalized);
+    return true;
+  }
+
+  function ensureGeolocationControl() {
+    if (geolocationControl) return geolocationControl;
+    if (!window.AMap) return null;
+    geolocationControl = new AMap.Geolocation({
+      enableHighAccuracy: true,
+      timeout: 5000,
+      position: 'RB',
+      offset: [10, 20],
+      zoomToAccuracy: true,
+      GeoLocationFirst: false,
+      convert: true,
+      getCityWhenFail: true,
+      extensions: 'base'
+    });
+    if (map) map.addControl(geolocationControl);
+    return geolocationControl;
+  }
+
+  function getMyLocation(options) {
+    const { force, centerMap } = { force: false, centerMap: false, ...(options || {}) };
+    const cached = store.getState().myLocation;
+    if (!force && cached && Number.isFinite(cached.lng) && Number.isFinite(cached.lat)) {
+      if (centerMap) centerMapOnMyLocation(cached);
+      return Promise.resolve(cached);
+    }
+    if (!force && myLocationPromise) {
+      return myLocationPromise.then(loc => {
+        if (centerMap) centerMapOnMyLocation(loc);
+        return loc;
+      });
+    }
+
+    const geo = ensureGeolocationControl();
+    if (!geo) return Promise.reject(new Error('Geolocation not ready'));
+
+    myLocationPromise = new Promise((resolve, reject) => {
+      updateGeoDiagnostics({ status: 'locating', method: 'getCurrentPosition' });
+      geo.getCurrentPosition((status, result) => {
+        if (status === 'complete') {
+          const loc = normalizeLngLat(result?.position);
+          if (loc) {
+            setMyLocation(loc, {
+              status: 'success',
+              method: 'getCurrentPosition',
+              locationType: result?.location_type,
+              info: result?.info,
+              message: result?.message,
+              accuracy: result?.accuracy
+            });
+            resolve(loc);
+            return;
+          }
+        }
+        
+        // Fallback to City Info (IP Location)
+        updateGeoDiagnostics({
+          status: 'error',
+          method: 'getCurrentPosition',
+          locationType: result?.location_type,
+          info: result?.info,
+          message: result?.message
+        });
+        geo.getCityInfo((statusCity, resultCity) => {
+           if (statusCity === 'complete') {
+              let pos = resultCity?.position;
+              if (!pos && Array.isArray(resultCity?.center)) {
+                  pos = { lng: resultCity.center[0], lat: resultCity.center[1] };
+              }
+              const loc = normalizeLngLat(pos);
+              if (loc) {
+                 setMyLocation(loc, {
+                   status: 'fallback_success',
+                   method: 'getCityInfo',
+                   locationType: resultCity?.location_type || 'ipcity',
+                   info: resultCity?.info,
+                   message: resultCity?.message
+                 });
+                 resolve(loc);
+                 return;
+              }
+           }
+           updateGeoDiagnostics({
+             status: 'fallback_error',
+             method: 'getCityInfo',
+             locationType: resultCity?.location_type || 'ipcity',
+             info: resultCity?.info,
+             message: resultCity?.message
+           });
+           const reason = String(result?.info || result?.message || resultCity?.info || resultCity?.message || '定位失败');
+           reject(new Error(reason));
+        });
+      });
+    }).finally(() => {
+      myLocationPromise = null;
+    });
+
+    return myLocationPromise.then(loc => {
+      if (centerMap) centerMapOnMyLocation(loc);
+      return loc;
+    });
+  }
+
+  window.__setMyLocation = function (payload) {
+    const lng = toNumber(payload?.lng, NaN);
+    const lat = toNumber(payload?.lat, NaN);
+    const accuracy = toNumber(payload?.accuracy, NaN);
+    window.__pendingMyLocation = { lng, lat, accuracy, message: payload?.message };
+    try {
+      if (typeof window.__applyPendingMyLocation === 'function') {
+        return window.__applyPendingMyLocation();
+      }
+    } catch (_) {}
+    return true;
+  };
+
+  function toast(message, durationMs) {
+    const el = document.getElementById('app-toast');
+    if (!el) {
+      console.warn(String(message || ''));
+      return;
+    }
+    el.textContent = String(message || '');
+    el.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      el.classList.remove('show');
+    }, toNumber(durationMs, 1600));
+  }
+
   function createStore(initialState) {
     let state = initialState;
     const listeners = new Set();
@@ -106,14 +297,27 @@
   const store = createStore({
     filters: getDefaultFilters(null),
     filteredData: [],
-    search: resetSearchState('')
+    search: resetSearchState(''),
+    myLocation: null,
+    waypoints: []
   });
+
+  window.__applyPendingMyLocation = function () {
+    const p = window.__pendingMyLocation;
+    if (!p) return false;
+    return setMyLocation({ lng: p.lng, lat: p.lat }, { status: 'native', method: 'native', accuracy: p.accuracy, message: p.message });
+  };
+  window.__applyPendingMyLocation();
 
   const dom = {
     searchInput: document.getElementById('search-input'),
     searchCounter: document.getElementById('search-counter'),
     minDemand: document.getElementById('min-demand'),
     maxDemand: document.getElementById('max-demand'),
+    geoDebugToggle: document.getElementById('geo-debug-toggle'),
+    geoDebugPanel: document.getElementById('geo-debug-panel'),
+    geoDebugClose: document.getElementById('geo-debug-close'),
+    geoDebugContent: document.getElementById('geo-debug-content'),
   };
 
   function setSearchState(next) {
@@ -132,6 +336,68 @@
     dom.searchCounter.style.display = 'block';
     dom.searchCounter.style.color = isError ? 'red' : '#555';
   }
+
+  function isGeoDebugEnabled() {
+    try {
+      const qs = new URLSearchParams(window.location.search || '');
+      if (qs.get('geoDebug') === '1') return true;
+      const hash = String(window.location.hash || '');
+      if (hash.includes('geoDebug')) return true;
+      if (window.localStorage && window.localStorage.getItem('geoDebug') === '1') return true;
+    } catch (_) {}
+    return false;
+  }
+
+  function setGeoDebugPanelVisible(visible) {
+    if (!dom.geoDebugPanel) return;
+    if (visible) dom.geoDebugPanel.classList.remove('hidden');
+    else dom.geoDebugPanel.classList.add('hidden');
+  }
+
+  function formatDiagnosticsText(diag) {
+    const d = diag || {};
+    const myLoc = store.getState().myLocation;
+    const time = d.updatedAt ? new Date(d.updatedAt).toLocaleString() : '';
+    const lines = [
+      `scheme: ${String(d.scheme || window.location?.protocol || '')}`,
+      `status: ${String(d.status || '')}`,
+      `method: ${String(d.method || '')}`,
+      `location_type: ${String(d.locationType || '')}`,
+      `accuracy(m): ${d.accuracy == null ? '' : String(d.accuracy)}`,
+      `info: ${String(d.info || '')}`,
+      `message: ${String(d.message || '')}`,
+      `updated_at: ${time}`,
+      '',
+      `myLocation: ${myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat) ? `${myLoc.lng},${myLoc.lat}` : ''}`
+    ];
+    return lines.join('\n');
+  }
+
+  function renderGeoDiagnosticsUI(diag) {
+    if (!dom.geoDebugContent) return;
+    dom.geoDebugContent.textContent = formatDiagnosticsText(diag);
+  }
+
+  window.__updateGeoDiagnostics = function (diag) {
+    renderGeoDiagnosticsUI(diag);
+  };
+
+  if (isGeoDebugEnabled() && dom.geoDebugToggle) {
+    dom.geoDebugToggle.classList.remove('hidden');
+    dom.geoDebugToggle.addEventListener('click', () => {
+      setGeoDebugPanelVisible(true);
+      renderGeoDiagnosticsUI(geoDiagnostics);
+    });
+  }
+  if (dom.geoDebugClose) {
+    dom.geoDebugClose.addEventListener('click', () => setGeoDebugPanelVisible(false));
+  }
+  if (dom.geoDebugPanel) {
+    dom.geoDebugPanel.addEventListener('click', (e) => {
+      if (e.target === dom.geoDebugPanel) setGeoDebugPanelVisible(false);
+    });
+  }
+  updateGeoDiagnostics({});
 
   function applyFilters(data, filters) {
     return data.filter(item => {
@@ -248,6 +514,13 @@
   const accessCodeSubmit = document.getElementById('access-code-submit');
   const accessCodeError = document.getElementById('access-code-error');
 
+  function ensureAmapReady() {
+    const p = window.__amapReadyPromise;
+    if (p && typeof p.then === 'function') return p;
+    if (window.AMap) return Promise.resolve(window.AMap);
+    return Promise.reject(new Error('AMap not loaded'));
+  }
+
   function checkAccessCode() {
     const code = accessCodeInput.value.trim();
     let valid = false;
@@ -263,7 +536,11 @@
       accessCodeModal.classList.add('hidden');
       document.getElementById('container').classList.remove('hidden');
       document.getElementById('mobile-search-bar').classList.remove('hidden');
-      initMap();
+      ensureAmapReady()
+        .then(() => initMap())
+        .catch(() => {
+          accessCodeError.textContent = '地图加载失败';
+        });
     } else {
       accessCodeError.textContent = '访问码错误';
     }
@@ -279,19 +556,24 @@
   function initMap() {
     map = new AMap.Map('container', CONFIG.map);
 
-    const disCountry = new AMap.DistrictLayer.Province(CONFIG.districtLayer);
-    disCountry.setMap(map);
+    ensureGeolocationControl();
+    getMyLocation({ centerMap: true }).catch(() => {});
 
-    map.plugin(['AMap.Heatmap'], function () {
-      heatmapInstance = new AMap.Heatmap(map, CONFIG.heatmap);
-      allData = normalizeData(window.allHeatmapData || []);
-      store.setState({ filters: getDefaultFilters(currentDep) });
-      recomputeFilteredData();
-    });
+    const disCountry = new AMap.DistrictLayer.Province(CONFIG.districtLayer);
+    map.add(disCountry);
+
+    heatmapInstance = new AMap.HeatMap(map, CONFIG.heatmap);
+    allData = normalizeData(window.allHeatmapData || []);
+    store.setState({ filters: getDefaultFilters(currentDep) });
+    recomputeFilteredData();
 
     map.on('zoomend', updateLabels);
     map.on('moveend', updateLabels);
-    map.on('click', closeProfile);
+
+    map.on('click', () => {
+      if (Date.now() < suppressMapClickUntil) return;
+      closeProfile();
+    });
     
     setupControls();
   }
@@ -300,11 +582,26 @@
     // Search
     const searchBtn = document.getElementById('search-button');
     if(searchBtn) searchBtn.addEventListener('click', performSearch);
+    
+    let searchDebounceTimer = null;
     if (dom.searchInput) {
       dom.searchInput.addEventListener('input', () => {
         const keyword = dom.searchInput.value.trim();
-        store.setState({ search: resetSearchState(keyword) });
-        renderSearchCounter(null, null, false);
+        
+        // Immediate UI update for empty keyword or clearing search
+        if (!keyword) {
+           if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+           store.setState({ search: resetSearchState('') });
+           renderSearchCounter(null, null, false);
+           return;
+        }
+
+        // Debounce for typing
+        if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+        searchDebounceTimer = setTimeout(() => {
+            store.setState({ search: resetSearchState(keyword) });
+            renderSearchCounter(null, null, false);
+        }, 300);
       });
     }
     
@@ -312,7 +609,8 @@
     document.getElementById('filter-toggle-btn').addEventListener('click', () => togglePanel('filter-panel'));
     
     // Close Buttons
-    document.querySelector('.close-panel-btn').addEventListener('click', () => closePanel('filter-panel'));
+    const filterCloseBtn = document.querySelector('#filter-panel .close-panel-btn');
+    if (filterCloseBtn) filterCloseBtn.addEventListener('click', () => closePanel('filter-panel'));
 
     const filterPanel = document.getElementById('filter-panel');
     if (filterPanel) {
@@ -339,6 +637,37 @@
         const row = e.target.closest('.stat-row[data-type]');
         if (!row) return;
         toggleTypeFilter(row.dataset.type);
+      });
+    }
+
+    // Navigation Preview Panel Controls
+    const closeNavPreviewBtn = document.getElementById('close-nav-preview');
+    if (closeNavPreviewBtn) {
+      closeNavPreviewBtn.addEventListener('click', () => NavigationModule.closeNavPreview());
+    }
+
+    const clearWaypointsBtn = document.getElementById('clear-waypoints-btn');
+    if (clearWaypointsBtn) {
+      clearWaypointsBtn.addEventListener('click', () => NavigationModule.clearWaypoints());
+    }
+
+    const startNavBtn = document.getElementById('start-nav-btn');
+    if (startNavBtn) {
+      startNavBtn.addEventListener('click', () => NavigationModule.startNavigationWithWaypoints());
+    }
+
+    const recenterPreviewBtn = document.getElementById('recenter-preview-btn');
+    if (recenterPreviewBtn) {
+      recenterPreviewBtn.addEventListener('click', () => NavigationModule.recenterPreviewOrigin());
+    }
+
+    const waypointList = document.getElementById('waypoint-list');
+    if (waypointList) {
+      waypointList.addEventListener('click', (e) => {
+        const btn = e.target.closest('button[data-remove-waypoint-id]');
+        if (!btn) return;
+        const id = btn.getAttribute('data-remove-waypoint-id');
+        NavigationModule.removeWaypoint(id);
       });
     }
     
@@ -426,70 +755,113 @@
 
   function updateLabels() {
     if (!map) return;
-    
-    if (currentMarkers.length > 0) {
-        map.remove(currentMarkers);
-        currentMarkers = [];
-    }
-    
+
     const zoom = map.getZoom();
-    if (zoom < CONFIG.labels.minZoomToShowLabel) return;
+    if (zoom < CONFIG.labels.minZoomToShowLabel) {
+      if (currentMarkerKeys.size > 0) {
+        for (const key of currentMarkerKeys) {
+          const marker = labelMarkersByKey.get(key);
+          if (marker) map.remove(marker);
+        }
+        currentMarkerKeys = new Set();
+      }
+      return;
+    }
 
     const bounds = map.getBounds();
     const visiblePoints = store.getState().filteredData.filter(p => bounds.contains([p.lng, p.lat]));
     const pointsToShow = visiblePoints.slice(0, CONFIG.labels.limit);
 
+    const nextKeys = new Set();
     pointsToShow.forEach(point => {
+      const key = `${point.name}|${point.lng}|${point.lat}`;
+      nextKeys.add(key);
+
       let className = 'custom-label';
       if (point.customerType === '存量客户') className += ' existing-customer-label';
       else if (point.customerType === '流失客户') className += ' lost-customer-label';
       else if (point.customerType === '潜在客户') className += ' potential-customer-label';
 
-      const content = `<div class="${className}">${escapeHtml(point.name)}</div>`;
-      
-      const marker = new AMap.Marker({
-        position: [point.lng, point.lat],
-        content: content,
-        offset: new AMap.Pixel(0, -15),
-        zIndex: 100,
-        extData: point
-      });
-      
-      marker.on('click', (e) => {
-          e.originEvent.stopPropagation(); // Prevent map click
-          showProfile(point);
-      });
-      marker.setMap(map);
-      currentMarkers.push(marker);
+      const safeName = escapeHtml(point.name);
+      const content = `<div class="${className}">${safeName}</div>`;
+
+      let marker = labelMarkersByKey.get(key);
+      if (!marker) {
+        marker = new AMap.Marker({
+          position: [point.lng, point.lat],
+          content: content,
+          offset: new AMap.Pixel(0, -15),
+          zIndex: 100,
+          extData: point,
+          bubble: false
+        });
+        marker.__labelContent = content;
+
+        const handleActivate = (e) => {
+          suppressMapClickUntil = Date.now() + 350;
+          if (e && e.originEvent && typeof e.originEvent.stopPropagation === 'function') {
+            e.originEvent.stopPropagation();
+          } else if (e && typeof e.stopPropagation === 'function') {
+            e.stopPropagation();
+          }
+          const p = marker.getExtData ? marker.getExtData() : null;
+          showProfile(p || point);
+        };
+
+        marker.on('click', handleActivate);
+      marker.on('touchend', handleActivate);
+      labelMarkersByKey.set(key, marker);
+    } else {
+      marker.setPosition([point.lng, point.lat]);
+        if (marker.getExtData && marker.setExtData) marker.setExtData(point);
+        if (marker.__labelContent !== content) {
+          marker.setContent(content);
+          marker.__labelContent = content;
+        }
+      }
+
+      map.add(marker);
     });
+
+    if (currentMarkerKeys.size > 0) {
+      for (const key of currentMarkerKeys) {
+        if (nextKeys.has(key)) continue;
+        const marker = labelMarkersByKey.get(key);
+        if (marker) map.remove(marker);
+      }
+    }
+    currentMarkerKeys = nextKeys;
+
+    const maxCacheSize = CONFIG.labels.limit * 3;
+    if (labelMarkersByKey.size > maxCacheSize) {
+      for (const [key, marker] of labelMarkersByKey) {
+        if (currentMarkerKeys.has(key)) continue;
+        if (marker && marker.getMap && marker.getMap() == null) {
+          map.remove(marker);
+          labelMarkersByKey.delete(key);
+        }
+        if (labelMarkersByKey.size <= maxCacheSize) break;
+      }
+    }
   }
 
   // Gesture Logic
   let gestureState = {
     startY: 0,
-    startTranslate: 0,
     currentTranslate: 0,
-    isDragging: false,
-    peekTranslate: 0
+    isDragging: false
   };
 
   function initProfileGestures() {
     const container = document.getElementById('profile-container');
     if (!container) return;
 
-    const getTranslateY = () => {
-        const style = window.getComputedStyle(container);
-        const matrix = new WebKitCSSMatrix(style.transform);
-        return matrix.m42;
-    };
-
     container.addEventListener('touchstart', (e) => {
-        if (!e.target.closest('.card-header') && !e.target.closest('.drag-handle-container')) return;
+        if (!e.target.closest('.card-header')) return;
         
         gestureState.isDragging = true;
         gestureState.startY = e.touches[0].clientY;
-        gestureState.startTranslate = getTranslateY();
-        gestureState.currentTranslate = gestureState.startTranslate;
+        gestureState.currentTranslate = 0;
         
         container.classList.add('is-dragging');
     }, { passive: false });
@@ -499,11 +871,7 @@
         if (e.cancelable) e.preventDefault();
         
         const deltaY = e.touches[0].clientY - gestureState.startY;
-        let newTranslate = gestureState.startTranslate + deltaY;
-        
-        // Resistance
-        if (newTranslate < 0) newTranslate *= 0.3;
-        
+        const newTranslate = Math.max(0, deltaY);
         gestureState.currentTranslate = newTranslate;
         container.style.transform = `translateY(${newTranslate}px)`;
     }, { passive: false });
@@ -512,22 +880,11 @@
         if (!gestureState.isDragging) return;
         gestureState.isDragging = false;
         container.classList.remove('is-dragging');
-        
-        const deltaY = gestureState.currentTranslate - gestureState.startTranslate;
-        
-        if (deltaY > 100) {
-            closeProfile();
-        } else if (deltaY < -50) {
-            container.style.transform = `translateY(0)`;
+
+        if (gestureState.currentTranslate > 40) {
+          closeProfile();
         } else {
-            const distToFull = Math.abs(gestureState.currentTranslate);
-            const distToPeek = Math.abs(gestureState.currentTranslate - gestureState.peekTranslate);
-            
-            if (distToFull < distToPeek) {
-                container.style.transform = `translateY(0)`;
-            } else {
-                container.style.transform = `translateY(${gestureState.peekTranslate}px)`;
-            }
+          container.style.transform = 'translateY(0)';
         }
     });
   }
@@ -556,7 +913,411 @@
     },
 
     state: {
-      lastNavAt: 0
+      lastNavAt: 0,
+      driving: null,
+      previewMap: null,
+      activeCustomerForNav: null,
+      previewSeq: 0
+    },
+
+    toLngLat(pos) {
+      if (!window.AMap) return null;
+      const normalized = normalizeLngLat(pos);
+      if (!normalized) return null;
+      return new AMap.LngLat(normalized.lng, normalized.lat);
+    },
+
+    ensureDrivingReady() {
+      if (window.AMap?.Driving) return Promise.resolve();
+      if (typeof window.AMap?.plugin === 'function') {
+        return new Promise(resolve => {
+          window.AMap.plugin('AMap.Driving', function () {
+            resolve();
+          });
+        });
+      }
+      return Promise.resolve();
+    },
+
+    resolvePreviewOrigin() {
+      return getMyLocation({ force: false, centerMap: false })
+        .then(loc => ({ origin: new AMap.LngLat(loc.lng, loc.lat), hint: '' }))
+        .catch(() => {
+          const cached = store.getState().myLocation;
+          if (cached && Number.isFinite(cached.lng) && Number.isFinite(cached.lat)) {
+            return { origin: new AMap.LngLat(cached.lng, cached.lat), hint: '使用缓存定位预览路线' };
+          }
+
+          const fromMainMap = map && typeof map.getCenter === 'function' ? this.toLngLat(map.getCenter()) : null;
+          if (fromMainMap) return { origin: fromMainMap, hint: '定位不可用，已按地图中心预览路线' };
+
+          const fromPreviewMap = this.state.previewMap && typeof this.state.previewMap.getCenter === 'function' ? this.toLngLat(this.state.previewMap.getCenter()) : null;
+          if (fromPreviewMap) return { origin: fromPreviewMap, hint: '定位不可用，已按地图中心预览路线' };
+
+          const cfgCenter = Array.isArray(CONFIG?.map?.center) ? { lng: CONFIG.map.center[0], lat: CONFIG.map.center[1] } : null;
+          const fromConfig = cfgCenter ? this.toLngLat(cfgCenter) : null;
+          return { origin: fromConfig, hint: '定位不可用，已按默认中心预览路线' };
+        });
+    },
+
+    normalizeWaypoint(point) {
+      const lng = toNumber(point?.lng, NaN);
+      const lat = toNumber(point?.lat, NaN);
+      if (!Number.isFinite(lng) || !Number.isFinite(lat)) return null;
+      if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+      const id = String(point?.id || `${lng.toFixed(6)},${lat.toFixed(6)}`);
+      return {
+        id,
+        lng,
+        lat,
+        name: String(point?.name ?? '').trim(),
+        address: String(point?.address ?? '').trim()
+      };
+    },
+
+    setActiveCustomer(point) {
+      const normalized = this.normalizeWaypoint(point);
+      this.state.activeCustomerForNav = normalized;
+    },
+
+    isSameWaypoint(a, b) {
+      if (!a || !b) return false;
+      if (a.id && b.id && a.id === b.id) return true;
+      return Math.abs(a.lat - b.lat) < 0.00001 && Math.abs(a.lng - b.lng) < 0.00001;
+    },
+
+    removeWaypoint(id) {
+      const current = store.getState().waypoints;
+      const next = current.filter(p => p && p.id !== id);
+      if (next.length === current.length) return;
+      store.setState({ waypoints: next });
+      this.renderNavPreview();
+    },
+
+    recenterPreviewOrigin() {
+      toast('正在重新定位...');
+      getMyLocation({ force: true, centerMap: false })
+        .then(loc => {
+          if (this.state.previewMap && typeof this.state.previewMap.setCenter === 'function') {
+            this.state.previewMap.setCenter([loc.lng, loc.lat]);
+          }
+          this.renderNavPreview();
+        })
+        .catch(() => {
+          toast('重新定位失败');
+        });
+    },
+
+    addToWaypoints(point) {
+      const current = store.getState().waypoints;
+      const nextPoint = this.normalizeWaypoint(point);
+      if (!nextPoint) {
+        toast('无效地点，无法加入途径点');
+        return;
+      }
+      const exists = current.some(p => this.isSameWaypoint(p, nextPoint));
+      if (exists) {
+        toast('该地点已在途径点列表中');
+        return;
+      }
+
+      if (current.length >= 16) {
+        toast('最多支持 16 个途径点');
+        return;
+      }
+      
+      const next = [...current, nextPoint];
+      store.setState({ waypoints: next });
+
+      const displayName = nextPoint.name || '未命名地点';
+      toast(`已加入途径点：${displayName}（共 ${next.length} 个）`);
+      closeProfile();
+    },
+
+    setDestination(point) {
+      const dest = this.normalizeWaypoint(point);
+      if (!dest) {
+        toast('无效目的地，无法导航');
+        return null;
+      }
+      const current = store.getState().waypoints;
+      const kept = current.filter(p => !this.isSameWaypoint(p, dest));
+      const next = [...kept.slice(0, 15), dest];
+      store.setState({ waypoints: next });
+      return next;
+    },
+
+    previewToDestination(point) {
+      const next = this.setDestination(point);
+      if (!next) return;
+      closeProfile();
+      this.openNavPreview();
+    },
+
+    openNavPreview() {
+      const panel = document.getElementById('nav-preview-panel');
+      if (!panel) return;
+      panel.classList.remove('hidden');
+      
+      // Delay render slightly to allow display:block to take effect for map sizing
+      requestAnimationFrame(() => {
+         if (this.state.previewMap && typeof this.state.previewMap.resize === 'function') {
+           this.state.previewMap.resize();
+         }
+         this.renderNavPreview();
+      });
+    },
+
+    closeNavPreview() {
+      const panel = document.getElementById('nav-preview-panel');
+      if (panel) panel.classList.add('hidden');
+    },
+
+    clearWaypoints() {
+      store.setState({ waypoints: [] });
+      if (this.state.driving) this.state.driving.clear();
+      this.renderNavPreview();
+    },
+
+    setPreviewStatus(message) {
+      const el = document.getElementById('nav-preview-status');
+      if (!el) return;
+      const text = String(message || '').trim();
+      if (!text) {
+        el.textContent = '';
+        el.classList.add('hidden');
+        return;
+      }
+      el.textContent = text;
+      el.classList.remove('hidden');
+    },
+
+    setRoutePanelVisible(visible) {
+      const el = document.getElementById('nav-preview-route-panel');
+      if (!el) return;
+      if (visible) el.classList.remove('hidden');
+      else el.classList.add('hidden');
+    },
+
+    renderNavPreview() {
+      const initialWaypoints = store.getState().waypoints;
+      const hasWaypoints = Array.isArray(initialWaypoints) && initialWaypoints.length > 0;
+      if (!hasWaypoints && this.state.activeCustomerForNav) {
+        this.setDestination(this.state.activeCustomerForNav);
+      }
+
+      const waypoints = store.getState().waypoints;
+      const countEl = document.getElementById('waypoint-count');
+      if (countEl) countEl.textContent = `${waypoints.length} 个途径点`;
+
+      const listEl = document.getElementById('waypoint-list');
+      if (listEl) {
+        if (!Array.isArray(waypoints) || waypoints.length === 0) {
+          listEl.innerHTML = '';
+        } else {
+          listEl.innerHTML = waypoints.map((p, idx) => {
+            const titlePrefix = idx === waypoints.length - 1 ? '终点：' : '';
+            const title = `${titlePrefix}${escapeHtml(p?.name || '未命名')}`;
+            const sub = escapeHtml(p?.address || `${toNumber(p?.lng, 0).toFixed(6)},${toNumber(p?.lat, 0).toFixed(6)}`);
+            const id = escapeHtml(p?.id || '');
+            return `
+              <div class="waypoint-item">
+                <div class="waypoint-item-main">
+                  <div class="waypoint-item-title">${title}</div>
+                  <div class="waypoint-item-subtitle">${sub}</div>
+                </div>
+                <button type="button" class="waypoint-remove-btn" data-remove-waypoint-id="${id}">×</button>
+              </div>
+            `;
+          }).join('');
+        }
+      }
+
+      const startNavBtn = document.getElementById('start-nav-btn');
+      if (startNavBtn) startNavBtn.disabled = !(Array.isArray(waypoints) && waypoints.length > 0);
+      
+      if (!Array.isArray(waypoints) || waypoints.length === 0) {
+        this.setPreviewStatus('请选择客户或先添加途径点');
+        this.setRoutePanelVisible(false);
+        if (this.state.driving) this.state.driving.clear();
+        return;
+      }
+
+      if (!window.AMap) {
+        this.setPreviewStatus('地图未就绪，请稍后重试');
+        return;
+      }
+
+      this.setPreviewStatus('正在规划路线...');
+      this.setRoutePanelVisible(true);
+      const seq = ++this.state.previewSeq;
+      const capped = waypoints.slice(0, 16);
+      const destination = new AMap.LngLat(capped[capped.length - 1].lng, capped[capped.length - 1].lat);
+
+      const buildWaypointsForDriving = (startIndexInclusive, endIndexExclusive) => {
+        const slice = capped.slice(startIndexInclusive, endIndexExclusive);
+        if (slice.length === 0) return undefined;
+        return slice.map(p => new AMap.LngLat(p.lng, p.lat));
+      };
+
+      const handleResult = (status, result, successMessage) => {
+        if (seq !== this.state.previewSeq) return;
+        if (status === 'complete') {
+          const route = result?.routes?.[0];
+          if (route && Number.isFinite(route.distance) && Number.isFinite(route.time)) {
+            const km = (route.distance / 1000).toFixed(1);
+            const min = Math.round(route.time / 60);
+            this.setPreviewStatus(successMessage ? `${successMessage}（约 ${km} km / ${min} 分钟）` : `约 ${km} km / ${min} 分钟`);
+          } else {
+            this.setPreviewStatus(successMessage || '');
+          }
+          return;
+        }
+        if (status === 'no_data') {
+          this.setPreviewStatus('未找到可用路线，可直接点击“开始导航”');
+          this.setRoutePanelVisible(false);
+          if (this.state.driving) this.state.driving.clear();
+          return;
+        }
+        const info = typeof result?.info === 'string' ? result.info : '';
+        const statusText = typeof status === 'string' ? status : '';
+        const combined = [info, statusText].filter(Boolean).join(' / ');
+        this.setPreviewStatus(combined ? `路线规划失败：${combined}` : '路线规划失败，可直接点击“开始导航”');
+        this.setRoutePanelVisible(false);
+        if (this.state.driving) this.state.driving.clear();
+      };
+
+      this.ensureDrivingReady()
+        .then(() => {
+          if (seq !== this.state.previewSeq) return;
+          if (!this.state.previewMap) {
+            this.state.previewMap = new AMap.Map('nav-preview-map-container', {
+              resizeEnable: true,
+              zoom: 12
+            });
+          } else if (typeof this.state.previewMap.resize === 'function') {
+            this.state.previewMap.resize();
+          }
+
+          if (!this.state.driving) {
+            this.state.driving = new AMap.Driving({
+              map: this.state.previewMap,
+              policy: 0,
+              extensions: 'all',
+              ferry: 0,
+              hideMarkers: false,
+              showTraffic: true,
+              isOutline: true,
+              outlineColor: 'white',
+              autoFitView: true,
+              panel: 'nav-preview-route-panel'
+            });
+          } else if (typeof this.state.driving.clear === 'function') {
+            this.state.driving.clear();
+          }
+        })
+        .then(() => {
+          if (seq !== this.state.previewSeq) return;
+          return this.resolvePreviewOrigin();
+        })
+        .then((resolved) => {
+          if (seq !== this.state.previewSeq) return;
+          if (!this.state.driving) {
+            this.setPreviewStatus('路线规划服务未就绪');
+            this.setRoutePanelVisible(false);
+            return;
+          }
+
+          const resolvedOrigin = resolved?.origin || null;
+          const resolvedHint = String(resolved?.hint || '');
+
+          const searchWithOriginAndWaypoints = (origin, waypointStartIndexInclusive, hint) => {
+            const waypointList = capped.length > 1 ? buildWaypointsForDriving(waypointStartIndexInclusive, capped.length - 1) : undefined;
+            if (waypointList && waypointList.length > 0) {
+              this.state.driving.search(origin, destination, { waypoints: waypointList }, (status, result) => {
+                handleResult(status, result, hint);
+              });
+            } else {
+              this.state.driving.search(origin, destination, (status, result) => {
+                handleResult(status, result, hint);
+              });
+            }
+          };
+
+          if (resolvedOrigin) {
+            searchWithOriginAndWaypoints(resolvedOrigin, 0, resolvedHint);
+            return;
+          }
+
+          if (capped.length >= 2) {
+            const origin = new AMap.LngLat(capped[0].lng, capped[0].lat);
+            searchWithOriginAndWaypoints(origin, 1, '定位不可用，已按途径点顺序预览路线');
+            return;
+          }
+
+          this.setPreviewStatus('无法获取起点信息，可直接点击“开始导航”');
+          this.setRoutePanelVisible(false);
+          if (this.state.driving) this.state.driving.clear();
+        })
+        .catch(() => {
+          if (seq !== this.state.previewSeq) return;
+          this.setPreviewStatus('路线预览初始化失败，可直接点击“开始导航”');
+          this.setRoutePanelVisible(false);
+          if (this.state.driving) this.state.driving.clear();
+        });
+    },
+
+    async startNavigationWithWaypoints() {
+      const waypoints = store.getState().waypoints;
+      if (!Array.isArray(waypoints) || waypoints.length === 0) {
+        toast('请先选择目的地或添加途径点');
+        return;
+      }
+      
+      let myLoc = null;
+      let fromLabel = '我的位置';
+      try {
+        myLoc = await getMyLocation({ force: true, centerMap: false });
+      } catch (_) {}
+      if (!myLoc) {
+        const cached = store.getState().myLocation;
+        if (cached && Number.isFinite(cached.lng) && Number.isFinite(cached.lat)) myLoc = cached;
+      }
+      if (!myLoc && map && typeof map.getCenter === 'function') {
+        const center = normalizeLngLat(map.getCenter());
+        if (center) {
+          myLoc = center;
+          fromLabel = '地图中心';
+        }
+      }
+
+      const params = new URLSearchParams();
+      params.set('mode', this.config.navigationMode);
+      params.set('src', this.config.sourceApp);
+      params.set('callnative', '1');
+      params.set('coordinate', 'gaode');
+      
+      if (myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat)) {
+        params.set('from', `${myLoc.lng},${myLoc.lat},${fromLabel}`);
+      } else {
+        toast('无法获取定位，导航起点将由高德自动定位');
+      }
+      
+      const dest = waypoints[waypoints.length - 1];
+      const safeName = String(dest.name || '').replaceAll(',', ' ').trim();
+      params.set('to', safeName ? `${dest.lng},${dest.lat},${safeName}` : `${dest.lng},${dest.lat}`);
+      
+      if (waypoints.length > 1) {
+        // AMAP URI 'via' param: lon,lat;lon,lat...
+        const vias = waypoints.slice(0, waypoints.length - 1)
+          .map(p => `${p.lng},${p.lat}`)
+          .join(';');
+        params.set('via', vias);
+      }
+      
+      const url = `https://uri.amap.com/navigation?${params.toString()}`;
+      const win = window.open(url, '_blank');
+      if (!win) window.location.assign(url);
     },
 
     navigateToCustomer(lat, lng, name, address) {
@@ -571,7 +1332,7 @@
       const addr = String(address || '').trim();
 
       if (!hasCoords && !addr) {
-        alert('无法获取客户位置信息');
+        toast('无法获取客户位置信息');
         return;
       }
 
@@ -644,6 +1405,11 @@
       params.set('callnative', '1');
       params.set('src', this.config.sourceApp);
 
+      const myLoc = store.getState().myLocation;
+      if (myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat)) {
+        params.set('from', `${myLoc.lng},${myLoc.lat},我的位置`);
+      }
+
       if (Number.isFinite(customer?.lat) && Number.isFinite(customer?.lng)) {
         params.set('coordinate', 'gaode');
         const safeName = String(customer?.name ?? '').replaceAll(',', ' ').trim();
@@ -660,6 +1426,13 @@
   function showProfile(point) {
     const container = document.getElementById('profile-container');
     if (!container) return;
+
+    NavigationModule.setActiveCustomer({
+      lat: point.lat,
+      lng: point.lng,
+      name: point.name,
+      address: point.add
+    });
     
     let factorsHtml = '';
     if (point.factors && point.factors.length > 0) {
@@ -681,13 +1454,10 @@
     }
 
     container.innerHTML = `
-      <div class="drag-handle-container">
-        <div class="drag-handle-bar"></div>
-      </div>
       <div class="card-header">
         <span>${escapeHtml(point.name)}</span>
         <div class="card-header-actions">
-          <button class="nav-header-button" type="button">导航</button>
+          <button class="nav-header-button" type="button">添加途径点</button>
           <button class="close-button" type="button">×</button>
         </div>
       </div>
@@ -713,17 +1483,7 @@
     container.style.transform = 'translateY(100%)';
     
     requestAnimationFrame(() => {
-        const fullHeight = container.offsetHeight;
-        const peekHeight = window.innerHeight * 0.45;
-        
-        let targetTranslate = 0;
-        // Only peek if significantly taller than peek height
-        if (fullHeight > peekHeight + 50) {
-            targetTranslate = fullHeight - peekHeight;
-        }
-        
-        gestureState.peekTranslate = targetTranslate;
-        container.style.transform = `translateY(${targetTranslate}px)`;
+        container.style.transform = 'translateY(0)';
         container.classList.add('active');
     });
 
@@ -733,14 +1493,24 @@
     const navButton = container.querySelector('.nav-button');
     if (navButton) {
       navButton.addEventListener('click', () => {
-        NavigationModule.navigateToCustomer(point.lat, point.lng, point.name, point.add);
+        NavigationModule.previewToDestination({
+          lat: point.lat,
+          lng: point.lng,
+          name: point.name,
+          address: point.add
+        });
       });
     }
 
     const navHeaderButton = container.querySelector('.nav-header-button');
     if (navHeaderButton) {
       navHeaderButton.addEventListener('click', () => {
-        NavigationModule.navigateToCustomer(point.lat, point.lng, point.name, point.add);
+        NavigationModule.addToWaypoints({
+          lat: point.lat,
+          lng: point.lng,
+          name: point.name,
+          address: point.add
+        });
       });
     }
   }
