@@ -34,6 +34,7 @@
   --header-height: 60px;
   --bottom-sheet-max-height: 95dvh;
   --border-width: 1px;
+  --android-nav-bar-height: 56px;
 }
 
 * {
@@ -106,7 +107,7 @@ body, html {
 /* Mobile Search Bar */
 #mobile-search-bar {
   position: fixed;
-  top: var(--space-s);
+  top: calc(var(--space-s) + env(safe-area-inset-top));
   left: var(--space-s);
   right: var(--space-s);
   z-index: 10;
@@ -263,7 +264,7 @@ body, html {
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding-top: calc(var(--header-height) + var(--space-m));
+  padding-top: calc(env(safe-area-inset-top) + var(--header-height) + var(--space-m));
 }
 
 .panel-header {
@@ -315,6 +316,9 @@ body, html {
   padding: 12px;
   border-radius: 6px;
   font-size: 16px;
+}
+.primary-btn:disabled {
+  opacity: 0.55;
 }
 .secondary-btn {
   flex: 1;
@@ -431,24 +435,6 @@ body, html {
 .dot-potential { background: var(--color-accent-potential); }
 .dot-delivery { background: var(--color-secondary); }
 .dot-self { background: var(--color-primary); }
-
-/* Drag Handle */
-.drag-handle-container {
-  width: 100%;
-  height: 24px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: grab;
-  flex-shrink: 0;
-}
-
-.drag-handle-bar {
-  width: 40px;
-  height: 5px;
-  background-color: #e0e0e0;
-  border-radius: 10px;
-}
 
 /* Bottom Sheet Profile */
 #profile-container {
@@ -624,7 +610,7 @@ body, html {
   }
 
   .panel-overlay {
-    padding-top: var(--space-m);
+    padding-top: calc(env(safe-area-inset-top) + var(--space-m));
   }
 
   .panel-content {
@@ -641,7 +627,7 @@ body, html {
 /* ==================== 导航按钮样式 ==================== */
 
 .card-footer {
-  padding: 16px 20px calc(16px + env(safe-area-inset-bottom));
+  padding: 16px 20px calc(16px + env(safe-area-inset-bottom) + var(--android-nav-bar-height));
   border-top: 1px solid #eee;
   background: #f8f9fa;
   border-radius: 0 0 20px 20px; /* Match container radius */
@@ -707,7 +693,7 @@ body, html {
 /* 横屏模式优化 */
 @media (orientation: landscape) {
   .card-footer {
-    padding: 12px 16px;
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom) + var(--android-nav-bar-height));
   }
 
   .nav-button {
@@ -727,4 +713,237 @@ body, html {
     padding: 12px 20px;
     font-size: 15px;
   }
+}
+
+/* Navigation Preview Panel */
+.full-screen-panel {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.full-screen-panel .panel-header {
+  padding: var(--space-m);
+  margin-bottom: 0;
+  background: white;
+  flex-shrink: 0;
+}
+
+.panel-footer-actions {
+  padding: var(--space-m);
+  background: white;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.panel-footer-actions .action-group {
+  display: flex;
+  gap: var(--space-s);
+}
+
+.nav-preview-waypoints {
+  padding: var(--space-m);
+  background: white;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.nav-preview-waypoints-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.waypoint-list {
+  margin-top: var(--space-s);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 160px;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.waypoint-item {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.waypoint-item-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.waypoint-item-title {
+  font-size: var(--font-m);
+  color: var(--color-text-dark);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waypoint-item-subtitle {
+  margin-top: 4px;
+  font-size: var(--font-s);
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waypoint-remove-btn {
+  background: none;
+  border: none;
+  padding: 6px 8px;
+  cursor: pointer;
+  color: var(--color-accent-lost);
+  font-size: 16px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.nav-preview-status {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  right: 12px;
+  z-index: 10;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: var(--font-m);
+}
+
+.nav-preview-route-panel {
+  background: #fff;
+  border-top: 1px solid var(--color-border);
+  padding: var(--space-m);
+  max-height: 32vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+}
+
+.nav-preview-route-panel:empty {
+  display: none;
+}
+
+.text-btn {
+  background: none;
+  border: none;
+  padding: 8px 12px;
+  font-size: var(--font-m);
+  cursor: pointer;
+  color: var(--color-text-dark);
+}
+
+.text-btn.danger {
+  color: var(--color-accent-lost);
+}
+
+.app-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(24px + env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+  z-index: 3000;
+  max-width: 80vw;
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  font-size: var(--font-m);
+  text-align: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease;
+}
+
+.app-toast.show {
+  opacity: 1;
+}
+
+.geo-debug-toggle {
+  position: fixed;
+  right: 12px;
+  bottom: calc(86px + env(safe-area-inset-bottom));
+  z-index: 3100;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: var(--font-s);
+}
+
+.geo-debug-toggle:active {
+  opacity: 0.9;
+}
+
+.geo-debug-panel {
+  position: fixed;
+  inset: 0;
+  z-index: 3200;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: calc(env(safe-area-inset-top) + 12px) 12px calc(env(safe-area-inset-bottom) + 12px);
+}
+
+.geo-debug-card {
+  width: 100%;
+  max-width: 520px;
+  background: #fff;
+  border-radius: 14px;
+  box-shadow: var(--shadow-base);
+  overflow: hidden;
+}
+
+.geo-debug-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+  font-size: var(--font-l);
+  font-weight: 700;
+}
+
+.geo-debug-close {
+  background: transparent;
+  border: none;
+  font-size: 22px;
+  line-height: 1;
+  padding: 6px 8px;
+  color: var(--color-text-dark);
+}
+
+.geo-debug-content {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: var(--font-xs);
+  line-height: 1.5;
+  max-height: 62vh;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #222;
 }
