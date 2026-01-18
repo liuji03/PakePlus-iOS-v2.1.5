@@ -84,6 +84,13 @@ body, html {
   text-align: center;
 }
 
+.access-code-hint {
+  font-size: var(--font-s);
+  color: #999;
+  line-height: 1.3;
+  margin-bottom: 8px;
+}
+
 #access-code-input {
   width: 100%;
   padding: 12px;
@@ -129,7 +136,7 @@ body, html {
 }
 
 .search-box {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   background: white;
   border-radius: var(--radius-m);
   box-shadow: var(--shadow-base);
@@ -152,7 +159,7 @@ body, html {
   overflow: hidden;
   pointer-events: auto;
   height: var(--control-height);
-  flex: 0 1 clamp(150px, 36vw, 220px);
+  flex: 1 1 0;
 }
 
 .demand-box input {
@@ -160,7 +167,8 @@ body, html {
   outline: none;
   flex: 1;
   min-width: 0;
-  font-size: var(--font-m);
+  font-size: var(--font-l);
+  font-family: inherit;
   height: 100%;
   background: transparent;
 }
@@ -196,7 +204,8 @@ body, html {
   border: none;
   flex: 1;
   padding: 0 12px 0 46px;
-  font-size: var(--font-xl);
+  font-size: var(--font-l);
+  font-family: inherit;
   outline: none;
   min-width: 0;
   width: 100%;
@@ -213,7 +222,7 @@ body, html {
   font-weight: bold;
   height: var(--control-height);
   font-size: var(--font-l);
-  flex: 0 0 auto;
+  flex: 1 1 0;
   white-space: nowrap;
   box-shadow: var(--shadow-base);
 }
@@ -276,7 +285,20 @@ body, html {
   margin-bottom: var(--space-m);
 }
 
+.panel-title {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
 .panel-header h3 { margin: 0; font-size: var(--font-xxl); }
+
+.panel-hint {
+  font-size: var(--font-s);
+  color: #999;
+  line-height: 1.2;
+}
 
 .panel-content {
   background: white;
@@ -664,8 +686,10 @@ body, html {
   transition: left 0.5s ease;
 }
 
-.nav-button:hover::before {
-  left: 100%;
+@media (hover: hover) and (pointer: fine) {
+  .nav-button:hover::before {
+    left: 100%;
+  }
 }
 
 .nav-button:active {
