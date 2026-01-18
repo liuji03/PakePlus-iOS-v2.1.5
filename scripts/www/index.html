@@ -9,6 +9,7 @@
 <body>
   <div id="access-code-modal">
     <div id="access-code-form">
+      <div class="access-code-hint">建议安装高德地图APP，导航体验更佳</div>
       <h2>请输入访问码</h2>
       <input type="password" id="access-code-input" placeholder="6位数字访问码">
       <button id="access-code-submit">进入系统</button>
@@ -24,13 +25,13 @@
       <div class="search-box">
         <div class="search-input-wrapper">
           <span id="search-counter"></span>
-          <input type="text" id="search-input" placeholder="搜索客户...">
+          <input type="text" id="search-input" placeholder="关键词定位客户">
         </div>
       </div>
       <div class="demand-box">
-        <input type="number" id="min-demand" min="0" placeholder="最小(吨)">
+        <input type="number" id="min-demand" min="0" placeholder="最小吨">
         <span class="range-sep">-</span>
-        <input type="number" id="max-demand" min="0" placeholder="最大(吨)">
+        <input type="number" id="max-demand" min="0" placeholder="最大吨">
       </div>
       <button id="search-button" class="primary-action-btn">搜索</button>
     </div>
@@ -45,7 +46,10 @@
   <div id="filter-panel" class="panel-overlay hidden">
     <div class="panel-content">
       <div class="panel-header">
-        <h3>统计与类型筛选</h3>
+        <div class="panel-title">
+          <h3>统计与类型筛选</h3>
+          <div class="panel-hint">点击统计行筛选</div>
+        </div>
         <button class="close-panel-btn">×</button>
       </div>
       
@@ -99,24 +103,63 @@
 
   <script>
     (function () {
-      var securityJsCode = window.AMAP_SECURITY_JS_CODE;
-      if (typeof securityJsCode === 'string' && securityJsCode.trim()) {
-        window._AMapSecurityConfig = { securityJsCode: securityJsCode.trim() };
+      function toStringSafe(v) { return v == null ? '' : String(v); }
+      function getQueryParams() {
+        try { return new URLSearchParams(window.location.search || ''); } catch (_) { return new URLSearchParams(); }
       }
+      function readConfig() {
+        const qs = getQueryParams();
+        const key = toStringSafe(qs.get('amapKey') || '').trim()
+          || (window.localStorage ? toStringSafe(window.localStorage.getItem('AMAP_KEY') || '').trim() : '')
+          || '5c28dc759462d7f99f7dc0caa88cf7c3';
+        const securityJsCode = toStringSafe(qs.get('securityJsCode') || '').trim()
+          || (window.localStorage ? toStringSafe(window.localStorage.getItem('AMAP_SECURITY_JS_CODE') || '').trim() : '')
+          || '86f8935a10c5e23074473df47fda61bd';
+        return { key: key, securityJsCode: securityJsCode };
+      }
+      const cfg = readConfig();
+      if (window.localStorage) {
+        if (cfg.key) window.localStorage.setItem('AMAP_KEY', cfg.key);
+        if (cfg.securityJsCode) window.localStorage.setItem('AMAP_SECURITY_JS_CODE', cfg.securityJsCode);
+      }
+      window._AMapSecurityConfig = { securityJsCode: cfg.securityJsCode };
     })();
   </script>
   <script src="https://webapi.amap.com/loader.js"></script>
   <script>
     window.__amapReadyPromise = AMapLoader.load({
-      key: '5c28dc759462d7f99f7dc0caa88cf7c3',
+      key: (window.localStorage && window.localStorage.getItem('AMAP_KEY')) || '5c28dc759462d7f99f7dc0caa88cf7c3',
       version: '2.0',
-      plugins: ['AMap.DistrictLayer', 'AMap.HeatMap', 'AMap.Geolocation', 'AMap.Driving']
+      plugins: ['AMap.DistrictLayer', 'AMap.HeatMap', 'AMap.Geolocation']
     }).then(function (AMap) {
       window.AMap = AMap;
       return AMap;
     });
   </script>
-  <script src="data.js" defer></script>
+  <script>
+    (function () {
+      function startPreload() {
+        if (window.__dataReadyPromise && typeof window.__dataReadyPromise.then === 'function') return;
+        if (Array.isArray(window.allHeatmapData)) return;
+        window.__dataReadyPromise = new Promise(function (resolve, reject) {
+          var script = document.createElement('script');
+          script.src = 'data.js';
+          script.async = true;
+          script.onload = function () { resolve(Array.isArray(window.allHeatmapData) ? window.allHeatmapData : []); };
+          script.onerror = function () { reject(new Error('data.js load failed')); };
+          (document.head || document.body || document.documentElement).appendChild(script);
+        });
+      }
+
+      function schedule() {
+        if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(startPreload, { timeout: 1500 });
+        else setTimeout(startPreload, 0);
+      }
+
+      if (document.readyState === 'complete' || document.readyState === 'interactive') schedule();
+      else document.addEventListener('DOMContentLoaded', schedule, { once: true });
+    })();
+  </script>
   <script src="script.js" defer></script>
 </body>
 </html>
