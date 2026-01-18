@@ -40,6 +40,7 @@
   const labelMarkersByKey = new Map();
   let currentMarkerKeys = new Set();
   let suppressMapClickUntil = 0;
+  let suppressNextMarkerClickUntil = 0;
   let geoDiagnostics = {
     status: 'idle',
     method: '',
@@ -94,6 +95,22 @@
     return (Array.isArray(data) ? data : []).map(normalizeItem);
   }
 
+  function normalizeDataAsync(data) {
+    const src = Array.isArray(data) ? data : [];
+    if (src.length === 0) return Promise.resolve([]);
+    const out = [];
+    let idx = 0;
+    return new Promise((resolve) => {
+      const pump = () => {
+        const end = Math.min(idx + 300, src.length);
+        for (; idx < end; idx += 1) out.push(normalizeItem(src[idx]));
+        if (idx < src.length) runWhenIdle(pump, 1200);
+        else resolve(out);
+      };
+      runWhenIdle(pump, 1200);
+    });
+  }
+
   function normalizeLngLat(pos) {
     const lng = toNumber(pos?.lng ?? (typeof pos?.getLng === 'function' ? pos.getLng() : NaN), NaN);
     const lat = toNumber(pos?.lat ?? (typeof pos?.getLat === 'function' ? pos.getLat() : NaN), NaN);
@@ -142,7 +159,7 @@
       enableHighAccuracy: true,
       timeout: 5000,
       position: 'RB',
-      offset: [10, 20],
+      offset: [10, 32],
       zoomToAccuracy: true,
       GeoLocationFirst: false,
       convert: true,
@@ -348,6 +365,22 @@
     return false;
   }
 
+  function explainAmapInfocode(infocode) {
+    const code = String(infocode ?? '').trim();
+    if (!code) return '';
+    const map = {
+      '10001': '无效 Key 或未开通对应服务',
+      '10002': '服务不存在或已关闭',
+      '10003': '配额已用尽（超出日/总量限制）',
+      '10004': '访问过于频繁（限流）',
+      '10005': 'IP/域名/Referer 白名单不匹配',
+      '10006': '需要安全密钥 securityJsCode 或配置不正确',
+      '20000': '请求参数缺失或格式错误',
+      '20001': '坐标/位置参数错误'
+    };
+    return map[code] || '';
+  }
+
   function setGeoDebugPanelVisible(visible) {
     if (!dom.geoDebugPanel) return;
     if (visible) dom.geoDebugPanel.classList.remove('hidden');
@@ -521,6 +554,32 @@
     return Promise.reject(new Error('AMap not loaded'));
   }
 
+  function runWhenIdle(fn, timeoutMs) {
+    const timeout = toNumber(timeoutMs, 1200);
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(fn, { timeout });
+      return;
+    }
+    setTimeout(fn, 0);
+  }
+
+  function ensureDataReady() {
+    if (Array.isArray(window.allHeatmapData)) return Promise.resolve(window.allHeatmapData);
+    const existing = window.__dataReadyPromise;
+    if (existing && typeof existing.then === 'function') return existing;
+
+    window.__dataReadyPromise = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'data.js';
+      script.async = true;
+      script.onload = () => resolve(Array.isArray(window.allHeatmapData) ? window.allHeatmapData : []);
+      script.onerror = () => reject(new Error('data.js load failed'));
+      (document.head || document.body || document.documentElement).appendChild(script);
+    });
+
+    return window.__dataReadyPromise;
+  }
+
   function checkAccessCode() {
     const code = accessCodeInput.value.trim();
     let valid = false;
@@ -563,9 +622,6 @@
     map.add(disCountry);
 
     heatmapInstance = new AMap.HeatMap(map, CONFIG.heatmap);
-    allData = normalizeData(window.allHeatmapData || []);
-    store.setState({ filters: getDefaultFilters(currentDep) });
-    recomputeFilteredData();
 
     map.on('zoomend', updateLabels);
     map.on('moveend', updateLabels);
@@ -576,6 +632,17 @@
     });
     
     setupControls();
+
+    runWhenIdle(() => {
+      ensureDataReady()
+        .then((raw) => normalizeDataAsync(raw || []))
+        .then((normalized) => {
+          allData = normalized;
+          store.setState({ filters: getDefaultFilters(currentDep) });
+          recomputeFilteredData();
+        })
+        .catch(() => {});
+    });
   }
 
   function setupControls() {
@@ -808,9 +875,18 @@
           showProfile(p || point);
         };
 
-        marker.on('click', handleActivate);
-      marker.on('touchend', handleActivate);
-      labelMarkersByKey.set(key, marker);
+        const handleTouchActivate = (e) => {
+          suppressNextMarkerClickUntil = Date.now() + 650;
+          handleActivate(e);
+        };
+        const handleClickActivate = (e) => {
+          if (Date.now() < suppressNextMarkerClickUntil) return;
+          handleActivate(e);
+        };
+
+        marker.on('click', handleClickActivate);
+        marker.on('touchend', handleTouchActivate);
+        labelMarkersByKey.set(key, marker);
     } else {
       marker.setPosition([point.lng, point.lat]);
         if (marker.getExtData && marker.setExtData) marker.setExtData(point);
@@ -918,6 +994,14 @@
       previewMap: null,
       activeCustomerForNav: null,
       previewSeq: 0
+    },
+
+    getDrivingPolicy() {
+      const p = window.AMap?.DrivingPolicy;
+      if (p && Object.prototype.hasOwnProperty.call(p, 'LEAST_TIME')) return p.LEAST_TIME;
+      if (p && Object.prototype.hasOwnProperty.call(p, 'REAL_TRAFFIC')) return p.REAL_TRAFFIC;
+      if (p && Object.prototype.hasOwnProperty.call(p, 'LEAST_DISTANCE')) return p.LEAST_DISTANCE;
+      return 0;
     },
 
     toLngLat(pos) {
@@ -1179,9 +1263,20 @@
           if (this.state.driving) this.state.driving.clear();
           return;
         }
+        const rawText = typeof result === 'string' ? result : '';
         const info = typeof result?.info === 'string' ? result.info : '';
+        const message = typeof result?.message === 'string' ? result.message : '';
+        const infocode = result?.infocode != null ? String(result.infocode) : '';
+        const infocodeHint = explainAmapInfocode(infocode);
+        const rawHint = rawText === 'INVALID_USER_SCODE' ? 'securityJsCode 缺失或不匹配' : '';
         const statusText = typeof status === 'string' ? status : '';
-        const combined = [info, statusText].filter(Boolean).join(' / ');
+        const combined = [
+          info,
+          message,
+          rawText ? `raw=${rawText}${rawHint ? `(${rawHint})` : ''}` : '',
+          infocode ? `infocode=${infocode}${infocodeHint ? `(${infocodeHint})` : ''}` : '',
+          statusText
+        ].filter(Boolean).join(' / ');
         this.setPreviewStatus(combined ? `路线规划失败：${combined}` : '路线规划失败，可直接点击“开始导航”');
         this.setRoutePanelVisible(false);
         if (this.state.driving) this.state.driving.clear();
@@ -1202,7 +1297,7 @@
           if (!this.state.driving) {
             this.state.driving = new AMap.Driving({
               map: this.state.previewMap,
-              policy: 0,
+              policy: this.getDrivingPolicy(),
               extensions: 'all',
               ferry: 0,
               hideMarkers: false,
@@ -1291,33 +1386,55 @@
         }
       }
 
-      const params = new URLSearchParams();
-      params.set('mode', this.config.navigationMode);
-      params.set('src', this.config.sourceApp);
-      params.set('callnative', '1');
-      params.set('coordinate', 'gaode');
-      
-      if (myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat)) {
-        params.set('from', `${myLoc.lng},${myLoc.lat},${fromLabel}`);
-      } else {
-        toast('无法获取定位，导航起点将由高德自动定位');
-      }
-      
+      const cleanupHandlers = [];
+      let cleaned = false;
+      const cleanup = () => {
+        if (cleaned) return;
+        cleaned = true;
+        cleanupHandlers.forEach(fn => fn());
+      };
+
       const dest = waypoints[waypoints.length - 1];
       const safeName = String(dest.name || '').replaceAll(',', ' ').trim();
-      params.set('to', safeName ? `${dest.lng},${dest.lat},${safeName}` : `${dest.lng},${dest.lat}`);
-      
-      if (waypoints.length > 1) {
-        // AMAP URI 'via' param: lon,lat;lon,lat...
-        const vias = waypoints.slice(0, waypoints.length - 1)
-          .map(p => `${p.lng},${p.lat}`)
-          .join(';');
-        params.set('via', vias);
+      const viaText = waypoints.length > 1
+        ? waypoints.slice(0, waypoints.length - 1).map(p => `${p.lng},${p.lat}`).join(';')
+        : '';
+
+      const appUrl = this.buildAppRoutePlanUrl({
+        origin: myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat) ? { lng: myLoc.lng, lat: myLoc.lat, name: fromLabel } : null,
+        destination: { lng: dest.lng, lat: dest.lat, name: safeName || '目的地' },
+        via: viaText
+      });
+
+      try {
+        window.location.href = appUrl;
+      } catch (_) {}
+
+      const fallbackTimer = setTimeout(() => {
+        const url = this.buildWebRoutePlanUrl({
+          origin: myLoc && Number.isFinite(myLoc.lng) && Number.isFinite(myLoc.lat) ? { lng: myLoc.lng, lat: myLoc.lat, name: fromLabel } : null,
+          destination: { lng: dest.lng, lat: dest.lat, name: safeName || '' },
+          via: viaText
+        });
+        const win = window.open(url, '_blank');
+        if (!win) window.location.assign(url);
+        cleanup();
+      }, this.config.timeout);
+      cleanupHandlers.push(() => clearTimeout(fallbackTimer));
+
+      const handlePageHide = () => cleanup();
+      window.addEventListener('pagehide', handlePageHide);
+      cleanupHandlers.push(() => window.removeEventListener('pagehide', handlePageHide));
+
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') cleanup();
+      };
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      cleanupHandlers.push(() => document.removeEventListener('visibilitychange', handleVisibilityChange));
+
+      if (!myLoc || !Number.isFinite(myLoc.lng) || !Number.isFinite(myLoc.lat)) {
+        toast('无法获取定位，导航起点将由高德自动定位');
       }
-      
-      const url = `https://uri.amap.com/navigation?${params.toString()}`;
-      const win = window.open(url, '_blank');
-      if (!win) window.location.assign(url);
     },
 
     navigateToCustomer(lat, lng, name, address) {
@@ -1397,6 +1514,59 @@
         style: 0
       });
       return `androidamap://navi?${params.toString()}`;
+    },
+
+    buildAppRoutePlanUrl(payload) {
+      const origin = payload?.origin || null;
+      const destination = payload?.destination || null;
+      const via = String(payload?.via || '').trim();
+      const params = new URLSearchParams();
+      params.set('sourceApplication', this.config.sourceApp);
+      params.set('dev', '0');
+      params.set('t', this.config.navigationMode === 'walk' ? '2' : '0');
+
+      if (origin && Number.isFinite(origin.lng) && Number.isFinite(origin.lat)) {
+        params.set('slon', String(origin.lng));
+        params.set('slat', String(origin.lat));
+        const sname = String(origin.name || '').replaceAll(',', ' ').trim();
+        if (sname) params.set('sname', sname);
+      }
+
+      if (destination && Number.isFinite(destination.lng) && Number.isFinite(destination.lat)) {
+        params.set('dlon', String(destination.lng));
+        params.set('dlat', String(destination.lat));
+        const dname = String(destination.name || '').replaceAll(',', ' ').trim();
+        if (dname) params.set('dname', dname);
+      }
+
+      if (via) params.set('via', via);
+
+      return `amapuri://route/plan/?${params.toString()}`;
+    },
+
+    buildWebRoutePlanUrl(payload) {
+      const origin = payload?.origin || null;
+      const destination = payload?.destination || null;
+      const via = String(payload?.via || '').trim();
+      const params = new URLSearchParams();
+      params.set('mode', this.config.navigationMode);
+      params.set('callnative', '1');
+      params.set('src', this.config.sourceApp);
+      params.set('coordinate', 'gaode');
+
+      if (origin && Number.isFinite(origin.lng) && Number.isFinite(origin.lat)) {
+        const sname = String(origin.name || '我的位置').replaceAll(',', ' ').trim();
+        params.set('from', `${origin.lng},${origin.lat},${sname}`);
+      }
+
+      if (destination && Number.isFinite(destination.lng) && Number.isFinite(destination.lat)) {
+        const dname = String(destination.name || '').replaceAll(',', ' ').trim();
+        params.set('to', dname ? `${destination.lng},${destination.lat},${dname}` : `${destination.lng},${destination.lat}`);
+      }
+
+      if (via) params.set('via', via);
+
+      return `https://uri.amap.com/navigation?${params.toString()}`;
     },
 
     buildWebUrl(customer) {
